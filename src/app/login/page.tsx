@@ -7,6 +7,7 @@ const ERRORS: Record<string, string> = {
   non_autorise: "Ce compte Google n'est pas autorisé. Demandez à un administrateur de vous ajouter.",
   session: "La connexion a expiré. Réessayez.",
   google: "La connexion Google a échoué. Réessayez.",
+  base: "Votre compte Google est reconnu, mais la base de données est inaccessible. Prévenez l'administrateur.",
   configuration: "La connexion Google n'est pas encore configurée sur ce site.",
 };
 

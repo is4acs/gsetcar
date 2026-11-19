@@ -34,7 +34,13 @@ export async function GET(req: Request) {
     if (payload.nonce !== pending.nonce || payload.email_verified !== true || typeof payload.email !== "string") return fail("google");
 
     // Autorisation : liste explicite d'utilisateurs actifs, pas seulement le domaine de l'adresse.
-    const user = await q1<{ id: string }>("select id from users where email = $1 and active", [payload.email.toLowerCase()]);
+    let user: { id: string } | null;
+    try {
+      user = await q1<{ id: string }>("select id from users where email = $1 and active", [payload.email.toLowerCase()]);
+    } catch (e) {
+      console.error("Base de données inaccessible à la connexion :", e);
+      return fail("base");
+    }
     if (!user) {
       await audit(undefined, null, "connexion_refusee", "user", null, { email: payload.email.toLowerCase() });
       return fail("non_autorise");

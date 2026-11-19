@@ -5,6 +5,7 @@ import { ANSWER_LABELS, SUMMARY_LABELS, checklistFor, computeSummary, nacelleChe
 import { vehiclePlanning } from "@/lib/planning";
 import { analyzeWorkbook, isExampleRow } from "@/lib/classeur";
 import { decrypt, encrypt } from "@/lib/secrets";
+import { dbConfig, parseCaCert } from "@/lib/db";
 import { fmtMoney, parseMoney } from "@/lib/format";
 import { reportFilename } from "@/lib/naming";
 import { backoffSeconds } from "@/lib/jobs";
@@ -161,5 +162,34 @@ describe("montants et noms", () => {
     expect(c).not.toContain("jeton");
     expect(decrypt(c)).toBe("jeton-drive");
     expect(() => decrypt(c.slice(0, -2) + (c.endsWith("A") ? "B" : "A") + "A")).toThrow();
+  });
+});
+
+describe("connexion PostgreSQL (TLS)", () => {
+  const PEM = "-----BEGIN CERTIFICATE-----\nMIIBtestAAAA\nBBBB\n-----END CERTIFICATE-----";
+  const remote = "postgres://u:p@aws-0-us-west-2.pooler.supabase.com:6543/postgres";
+  it("vérifie le certificat par défaut", () => {
+    expect(dbConfig(remote, {}).ssl).toEqual({ rejectUnauthorized: true });
+  });
+  it("DATABASE_CA_CERT : autorité fournie, vérification conservée (PEM, \\n littéraux ou base64)", () => {
+    for (const raw of [PEM, PEM.replace(/\n/g, "\\n"), Buffer.from(PEM).toString("base64"), `  ${PEM}\r\n`]) {
+      expect(dbConfig(remote, { DATABASE_CA_CERT: raw }).ssl).toEqual({ ca: PEM + "\n", rejectUnauthorized: true });
+    }
+    // L'autorité fournie l'emporte sur le mode de secours : on ne désactive pas la vérification par accident.
+    expect(dbConfig(remote, { DATABASE_CA_CERT: PEM, DATABASE_SSL: "no-verify" }).ssl).toMatchObject({ rejectUnauthorized: true });
+  });
+  it("certificat illisible : erreur explicite plutôt qu'une connexion non vérifiée", () => {
+    expect(() => parseCaCert("n'importe quoi")).toThrow(/DATABASE_CA_CERT/);
+    expect(() => dbConfig(remote, { DATABASE_CA_CERT: "aGVsbG8=" })).toThrow(/DATABASE_CA_CERT/);
+  });
+  it("secours no-verify seulement s'il est demandé ; base locale sans TLS", () => {
+    expect(dbConfig(remote, { DATABASE_SSL: "no-verify" }).ssl).toEqual({ rejectUnauthorized: false });
+    expect(dbConfig("postgres://u:p@localhost:5432/x", { DATABASE_CA_CERT: PEM }).ssl).toBeUndefined();
+    expect(dbConfig(remote, { DATABASE_SSL: "disable" }).ssl).toBeUndefined();
+  });
+  it("retire sslmode de l'URL pour qu'il n'écrase pas la configuration", () => {
+    expect(dbConfig(remote + "?sslmode=require&application_name=gset", {}).connectionString).toBe(remote + "?application_name=gset");
+    expect(dbConfig(remote + "?sslmode=require", {}).connectionString).toBe(remote);
+    expect(dbConfig(remote + "?a=1&sslmode=no-verify", {}).connectionString).toBe(remote + "?a=1");
   });
 });

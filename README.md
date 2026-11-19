@@ -135,6 +135,12 @@ dossier non vérifié, correction versionnée et périmètres.
 
 1. **Base** : projet PostgreSQL (Supabase par exemple), `DATABASE_URL`, puis `npm run migrate` et `npm run seed`
    avec `BOOTSTRAP_ADMIN_EMAIL`.
+   **Certificat Supabase** : l'autorité de certification de Supabase n'est pas connue de Node.js, la connexion est
+   donc refusée (« self-signed certificate in certificate chain ») tant que `DATABASE_CA_CERT` n'est pas définie.
+   Télécharger le certificat dans le tableau de bord Supabase (Project Settings → Database → SSL Configuration →
+   Download certificate) et coller son contenu PEM dans la variable `DATABASE_CA_CERT` (Vercel, Production), puis
+   redéployer. La vérification TLS reste active. `DATABASE_SSL=no-verify` n'est qu'un secours : la connexion reste
+   chiffrée mais l'identité du serveur n'est plus vérifiée.
 2. **Connexion Google** : client OAuth « Application Web » dans Google Cloud, URI de redirection
    `<APP_URL>/api/auth/callback`.
 3. **Drive** — le dossier « VEHICULES GUYANE » (`1rAF8Zuge154rJekKGx6VzrzheZfDnPiO`) est dans « Mon Drive » :
