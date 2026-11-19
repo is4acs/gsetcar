@@ -1,12 +1,14 @@
 // Accès Google Drive côté serveur uniquement. Deux modes réels + un simulateur de développement.
 //  - service_account : identité de service (adaptée à un Drive partagé, ou à des dossiers partagés
 //    avec elle — attention : une identité de service n'a pas de quota de stockage propre dans « Mon Drive »).
-//  - oauth : jeton de rafraîchissement d'un compte Google habilité sur les dossiers.
+//  - oauth : compte Google GSET habilité sur les dossiers (cas d'un dossier dans « Mon Drive »). Le compte est
+//    connecté depuis Administration ; son jeton de rafraîchissement est stocké chiffré en base.
 //  - mock : simulateur local sur disque, interdit en production.
 import { importPKCS8, SignJWT } from "jose";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { getSecret } from "./secrets";
 
 export class DriveError extends Error {
   constructor(message: string, public status: number) { super(message); }
@@ -27,6 +29,8 @@ export interface DriveClient {
   getFile(id: string): Promise<DriveFile | null>;
   /** Retourne null si un fichier porte déjà cet identifiant (envoi précédent déjà accepté par Drive). */
   createFile(file: NewFile): Promise<DriveFile | null>;
+  /** Met à la corbeille un fichier créé par l'application (utilisé uniquement pour le fichier du dépôt pilote). */
+  trashFile(id: string): Promise<void>;
 }
 
 export function driveMode(): "service_account" | "oauth" | "mock" | "none" {
@@ -50,6 +54,14 @@ export const folderUrl = (id: string) => `https://drive.google.com/drive/folders
 
 // ---------------------------------------------------------------------------------- Google
 
+export const DRIVE_SECRET = "drive_oauth_refresh_token";
+export const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
+/** Client OAuth utilisé pour Drive : dédié s'il est défini, sinon celui de la connexion des utilisateurs. */
+export function driveOAuthClient() {
+  return { id: process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID, secret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET };
+}
+export function resetDriveToken() { cachedToken = null; }
+
 let cachedToken: { token: string; exp: number; mode: string } | null = null;
 
 async function accessToken(mode: "service_account" | "oauth"): Promise<string> {
@@ -65,12 +77,14 @@ async function accessToken(mode: "service_account" | "oauth"): Promise<string> {
       .setIssuedAt(now).setExpirationTime(now + 3000).sign(await importPKCS8(key.private_key, "RS256"));
     body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion });
   } else {
-    const { GOOGLE_DRIVE_CLIENT_ID: id, GOOGLE_DRIVE_CLIENT_SECRET: secret, GOOGLE_DRIVE_REFRESH_TOKEN: refresh } = process.env;
-    if (!id || !secret || !refresh) throw new DriveError("Identifiants OAuth Drive manquants.", 0);
+    const { id, secret } = driveOAuthClient();
+    const refresh = process.env.GOOGLE_DRIVE_REFRESH_TOKEN || (await getSecret(DRIVE_SECRET));
+    if (!id || !secret) throw new DriveError("Client OAuth Google non configuré.", 0);
+    if (!refresh) throw new DriveError("Aucun compte Google Drive connecté : connectez le compte GSET autorisé dans Administration.", 0);
     body = new URLSearchParams({ grant_type: "refresh_token", client_id: id, client_secret: secret, refresh_token: refresh });
   }
   const res = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new DriveError(`Authentification Drive refusée (${res.status}).`, res.status === 400 ? 401 : res.status);
+  if (!res.ok) throw new DriveError(`Authentification Drive refusée (${res.status}) : reconnectez le compte Google Drive dans Administration.`, res.status === 400 ? 401 : res.status);
   const json = (await res.json()) as { access_token: string; expires_in: number };
   cachedToken = { token: json.access_token, exp: Date.now() + json.expires_in * 1000, mode };
   return json.access_token;
@@ -158,6 +172,12 @@ class GoogleDrive implements DriveClient {
     const f = await res.json();
     return { id: f.id, webViewLink: f.webViewLink ?? null, trashed: false };
   }
+  async trashFile(id: string) {
+    const res = await this.call(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ trashed: true }),
+    });
+    if (!res.ok) await this.fail(res);
+  }
 }
 
 // ---------------------------------------------------------------------------------- Simulateur
@@ -212,6 +232,12 @@ export class MockDrive implements DriveClient {
     writeFileSync(join(this.dir, file.id), file.data);
     if (process.env.DRIVE_MOCK_FAIL === "create_lost") throw new DriveError("Réponse Drive perdue (simulation).", 503);
     return { id: file.id, webViewLink: `https://drive.invalid/mock/${file.id}`, trashed: false };
+  }
+  async trashFile(id: string) {
+    this.check();
+    const idx = this.load();
+    delete idx.files[id];
+    this.save(idx);
   }
   /** Pour les tests. */
   dump(): MockIndex { return this.load(); }

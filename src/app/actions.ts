@@ -233,8 +233,10 @@ export async function correctInspectionAction(form: FormData) {
 export async function updateVehicle(form: FormData) {
   return run(form, "vehicle.edit", async (user) => {
     const id = uuid(form, "id");
-    const fields = { site: opt(form, "site", 100), assignment: opt(form, "assignment", 200), notes: opt(form, "notes") };
-    await q("update vehicles set site = $2, assignment = $3, notes = $4 where id = $1", [id, fields.site, fields.assignment, fields.notes]);
+    const week = str(form, "control_week");
+    if (week && !/^[1-4]$/.test(week)) throw new ApiError(422, "Semaine de contrôle invalide (1 à 4).");
+    const fields = { site: opt(form, "site", 100), assignment: opt(form, "assignment", 200), notes: opt(form, "notes"), control_week: week ? Number(week) : null };
+    await q("update vehicles set site = $2, assignment = $3, notes = $4, control_week = $5 where id = $1", [id, fields.site, fields.assignment, fields.notes, fields.control_week]);
     await audit(undefined, user.id, "vehicule_modifie", "vehicle", id, fields);
   });
 }
@@ -342,15 +344,21 @@ export async function verifyFolderAction(form: FormData) {
   });
 }
 
-export async function saveInterval(form: FormData) {
+/** Personne à prévenir par téléphone en cas d'immobilisation (bouton « Appeler … » du contrôleur). */
+export async function saveAlertContact(form: FormData) {
   return run(form, "admin.manage", async (user) => {
-    const raw = str(form, "days");
-    if (raw === "") {
-      await q("delete from settings where key = 'periodicite_controle_jours'");
-    } else {
-      if (!/^\d{1,3}$/.test(raw) || Number(raw) < 1) throw new ApiError(422, "Nombre de jours invalide.");
-      await q("insert into settings (key, value, updated_by) values ('periodicite_controle_jours', $1, $2) on conflict (key) do update set value = excluded.value, updated_at = now(), updated_by = excluded.updated_by", [JSON.stringify(Number(raw)), user.id]);
-    }
-    await audit(undefined, user.id, "periodicite_modifiee", "settings", "periodicite_controle_jours", { jours: raw || null });
+    const name = str(form, "name", 60) || "Salim", phone = str(form, "phone", 30);
+    if (phone && !/^\+?[\d .()-]{6,25}$/.test(phone)) throw new ApiError(422, "Numéro de téléphone invalide.");
+    await q("insert into settings (key, value, updated_by) values ('contact_urgence', $1, $2) on conflict (key) do update set value = excluded.value, updated_at = now(), updated_by = excluded.updated_by",
+      [JSON.stringify({ name, phone: phone || null }), user.id]);
+    await audit(undefined, user.id, "contact_urgence_modifie", "settings", "contact_urgence", { nom: name, numero_renseigne: !!phone });
+  });
+}
+
+export async function disconnectDrive(form: FormData) {
+  return run(form, "admin.manage", async (user) => {
+    await q("delete from app_secrets where key = 'drive_oauth_refresh_token'");
+    await audit(undefined, user.id, "drive_compte_deconnecte", "settings", "drive_oauth_refresh_token");
+    return "Compte Google Drive déconnecté. Les envois restent en attente jusqu'à une nouvelle connexion.";
   });
 }

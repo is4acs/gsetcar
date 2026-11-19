@@ -32,10 +32,11 @@ export const GET = apiHandler(async (req) => {
       `select v.plate, i.performed_at, u.name, i.mileage_km, i.summary, i.critical_flag, i.version,
               (select count(*) from inspection_answers a where a.inspection_id = i.id and a.answer = 'intervention') as interventions,
               (select count(*) from inspection_answers a where a.inspection_id = i.id and a.answer = 'a_surveiller') as surveiller,
+              (select count(*) from inspection_answers a where a.inspection_id = i.id and a.answer = 'urgent') as urgents,
               (select count(*) from inspection_answers a where a.inspection_id = i.id and a.answer = 'non_verifie') as non_verifies
        from inspections i join vehicles v on v.id = i.vehicle_id join users u on u.id = i.author_id order by i.performed_at desc`);
-    rows = [["Immatriculation", "Date", "Technicien", "Kilométrage", "Synthèse", "Critique signalé", "Version", "Interventions nécessaires", "À surveiller", "Non vérifiés"],
-      ...data.map((r) => [r.plate, isoDay(r.performed_at), r.name, r.mileage_km, SUMMARY_LABELS[r.summary as Summary], r.critical_flag ? "oui" : "non", r.version, r.interventions, r.surveiller, r.non_verifies])];
+    rows = [["Immatriculation", "Date", "Technicien", "Kilométrage", "Synthèse", "Signalement critique", "Version", "À surveiller", "À réparer", "Urgents", "Non vérifiés"],
+      ...data.map((r) => [r.plate, isoDay(r.performed_at), r.name, r.mileage_km, SUMMARY_LABELS[r.summary as Summary], r.critical_flag ? "oui" : "non", r.version, r.surveiller, r.interventions, r.urgents, r.non_verifies])];
   } else throw new ApiError(400, "Type d'export inconnu.");
   return new Response(csv(rows), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="gset_${type}_${isoDay(new Date())}.csv"`, "cache-control": "private, no-store" } });
 });

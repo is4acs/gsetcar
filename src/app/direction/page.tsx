@@ -3,34 +3,27 @@ import { requirePermission } from "@/lib/auth";
 import { q, q1 } from "@/lib/db";
 import { can } from "@/lib/permissions";
 import { Badge, Empty, Flash, Shell } from "@/components/ui";
-import { inspectionIntervalDays, listVehicles } from "@/lib/queries";
+import { listVehicles } from "@/lib/queries";
+import { doneMonths, vehiclePlanning } from "@/lib/planning";
 import { REPAIR_STATUS_LABELS, OPEN_REPAIR_STATUSES, type RepairStatus } from "@/lib/repair-status";
 import { PRIORITY_LABELS, PRIORITIES, SUMMARY_LABELS, type Priority } from "@/lib/checklist";
 import { DEADLINE_LABELS, PRIORITY_TONES, REPAIR_TONES, SUMMARY_TONES } from "@/lib/labels";
-import { fmtDate, fmtDateTime, fmtKm, fmtMoney, nowMs } from "@/lib/format";
+import { fmtDate, fmtDateTime, fmtKm, fmtMoney, fmtMonth, nowMs } from "@/lib/format";
 import { acknowledgeCritical, decideImmobilization } from "@/app/actions";
-
-const DAY = 86400_000;
 
 export default async function Dashboard({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const user = await requirePermission("dashboard.view");
   const sp = await searchParams;
   const f = { plate: sp.plaque ?? "", site: sp.site ?? "", priority: sp.priorite ?? "", status: sp.statut ?? "" };
-  const [all, interval] = await Promise.all([listVehicles(user), inspectionIntervalDays()]);
+  const all = await listVehicles(user);
   const active = all.filter((v) => v.status === "actif");
   const sites = [...new Set(all.map((v) => v.site).filter(Boolean))] as string[];
   const vehicles = active.filter((v) => (!f.plate || v.plate === f.plate) && (!f.site || v.site === f.site));
   const ids = vehicles.map((v) => v.id);
 
   const now = nowMs();
-  const dueState = (v: (typeof active)[number]): { label: string; tone: "red" | "amber" | "green" | "gray"; late: boolean } => {
-    if (!v.last_inspection_at) return { label: "Jamais contrôlé", tone: "amber", late: true };
-    if (!interval) return { label: `Contrôlé le ${fmtDate(v.last_inspection_at)}`, tone: "gray", late: false };
-    const due = new Date(v.last_inspection_at).getTime() + interval * DAY;
-    if (due < now) return { label: `En retard depuis le ${fmtDate(new Date(due))}`, tone: "red", late: true };
-    if (due < now + 7 * DAY) return { label: `À faire avant le ${fmtDate(new Date(due))}`, tone: "amber", late: true };
-    return { label: `Prochain avant le ${fmtDate(new Date(due))}`, tone: "green", late: false };
-  };
+  const done = await doneMonths(ids);
+  const plan = new Map(vehicles.map((v) => [v.id, vehiclePlanning(v.control_week, done.get(v.id) ?? new Set(), new Date(now))]));
 
   const [criticals, proposals, repairs, issues, jobs, deadlines] = await Promise.all([
     q<{ id: string; plate: string; critical_comment: string; performed_at: Date; author: string }>(
@@ -41,13 +34,13 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
        where m.status = 'proposee' and m.vehicle_id = any($1) order by m.proposed_at`, [ids]),
     q<{ id: string; title: string; status: RepairStatus; urgent: boolean; plate: string; garage: string | null; estimate_ht_cents: number | null; estimate_ttc_cents: number | null; planned_on: Date | null; priority: Priority | null }>(
       `select r.id, r.title, r.status, r.urgent, r.garage, r.estimate_ht_cents, r.estimate_ttc_cents, r.planned_on, v.plate, s.priority from repairs r join vehicles v on v.id = r.vehicle_id left join issues s on s.id = r.issue_id
-       where r.vehicle_id = any($1) and r.status = any($2) and ($3 = '' or s.priority = $3 or ($3 = 'urgente' and r.urgent))
+       where r.vehicle_id = any($1) and r.status = any($2) and ($3 = '' or s.priority = $3 or ($3 = 'urgent' and r.urgent))
        order by r.urgent desc, array_position($4::text[], r.status::text), r.updated_at desc`, [ids, f.status ? [f.status] : OPEN_REPAIR_STATUSES, f.priority, OPEN_REPAIR_STATUSES]),
-    q<{ id: string; title: string; priority: Priority; plate: string; vehicle_id: string; inspection_id: string | null; created_at: Date }>(
+    q<{ id: string; title: string; priority: Priority | null; plate: string; vehicle_id: string; inspection_id: string | null; created_at: Date }>(
       `select s.id, s.title, s.priority, v.plate, s.vehicle_id, s.inspection_id, s.created_at from issues s join vehicles v on v.id = s.vehicle_id
        where s.status = 'ouverte' and s.vehicle_id = any($1) and ($2 = '' or s.priority = $2)
          and not exists (select 1 from repairs r where r.issue_id = s.id and r.status not in ('refuse','annule'))
-       order by array_position(array['urgente','haute','normale','basse'], s.priority), s.created_at`, [ids, f.priority]),
+       order by array_position(array['urgent','15_jours','1_mois','prochain_entretien'], s.priority) nulls last, s.created_at`, [ids, f.priority]),
     q1<{ pending: number; problems: number }>("select count(*) filter (where status <> 'termine')::int as pending, count(*) filter (where status in ('bloque','echec'))::int as problems from drive_jobs"),
     q<{ plate: string; vehicle_id: string; kind: string; due_on: Date; source: string }>(
       `select v.plate, d.vehicle_id, d.kind, d.due_on, d.source from vehicle_deadlines d join vehicles v on v.id = d.vehicle_id
@@ -56,7 +49,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   const toValidate = repairs.filter((r) => r.status === "a_valider");
   const urgentRepairs = repairs.filter((r) => r.urgent);
   const immobilized = vehicles.filter((v) => v.immobilized);
-  const due = vehicles.filter((v) => dueState(v).late);
+  const due = vehicles.filter((v) => plan.get(v.id)!.current.due || plan.get(v.id)!.lateMonths.length > 0);
   const unconfirmed = all.filter((v) => v.status === "a_confirmer" || !v.status_confirmed_at);
   const back = "/direction";
   const tiles: [string, number | string, string, boolean][] = [
@@ -89,7 +82,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
           </a>
         ))}
       </div>
-      {!interval && <p className="muted">Périodicité des contrôles non définie : seuls les véhicules jamais contrôlés sont comptés comme « dus ». {can(user.role, "admin.manage") ? <Link className="text-blue-700 underline" href="/admin">La définir</Link> : "À définir par un administrateur."}</p>}
+      <p className="muted">Un contrôle par véhicule et par mois, selon la semaine prévue (S1 à S4). « Dus ou en retard » : semaine prévue atteinte ou dépassée ce mois-ci, ou mois passé sans contrôle. <Link className="text-blue-700 underline" href="/planning">Voir le planning et le registre</Link></p>
       {unconfirmed.length > 0 && <p className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">Statut à confirmer par la direction (actif / vendu) : {unconfirmed.map((v) => <Link key={v.id} href={`/vehicules/${v.id}`} className="mr-2 font-mono font-semibold underline">{v.plate}</Link>)}</p>}
 
       <section id="urgences" className="card space-y-3">
@@ -128,14 +121,14 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
 
       <section id="parc" className="card space-y-2">
         <h2 className="h2">Parc actif</h2>
-        <div className="overflow-x-auto"><table className="table"><thead><tr><th>Véhicule</th><th>Site / affectation</th><th>État</th><th>Dernier contrôle</th><th>Contrôle périodique</th><th>Km</th><th>Rép. ouvertes</th><th>Drive</th></tr></thead><tbody>
-          {vehicles.map((v) => { const d = dueState(v); return (
+        <div className="overflow-x-auto"><table className="table"><thead><tr><th>Véhicule</th><th>Site / affectation</th><th>État</th><th>Dernier contrôle</th><th>Contrôle du mois</th><th>Km</th><th>Rép. ouvertes</th><th>Drive</th></tr></thead><tbody>
+          {vehicles.map((v) => { const d = plan.get(v.id)!; return (
             <tr key={v.id}>
               <td><Link href={`/vehicules/${v.id}`} className="font-mono font-semibold text-blue-700 underline">{v.plate}</Link><div className="muted">{v.label}</div></td>
               <td>{[v.site, v.assignment].filter(Boolean).join(" · ") || <span className="text-slate-400">Non renseigné</span>}</td>
               <td>{v.immobilized ? <Badge tone="red">Immobilisé</Badge> : <Badge tone="green">Disponible</Badge>}{v.immobilization_proposed && <div><Badge tone="amber">Immobilisation proposée</Badge></div>}</td>
               <td>{v.last_inspection_id ? <Link href={`/controles/${v.last_inspection_id}`} className="underline">{fmtDate(v.last_inspection_at)}</Link> : "—"}{v.last_summary && <div><Badge tone={SUMMARY_TONES[v.last_summary]}>{SUMMARY_LABELS[v.last_summary].split(" :")[0]}</Badge></div>}</td>
-              <td><Badge tone={d.tone}>{d.label}</Badge></td>
+              <td><Badge tone={d.current.tone}>{d.current.label}</Badge>{d.lateMonths.length > 0 && <div><Badge tone="red">En retard : {d.lateMonths.map((m) => fmtMonth(m, true)).join(", ")}</Badge></div>}</td>
               <td>{fmtKm(v.last_km)}</td>
               <td>{v.open_repairs}</td>
               <td>{!v.drive_folder_id ? <Badge tone="red">Dossier à localiser</Badge> : v.drive_folder_verified_at ? <Badge tone="green">Vérifié</Badge> : <Badge tone="amber">Non vérifié</Badge>}</td>
@@ -157,7 +150,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       <section className="card space-y-2">
         <h2 className="h2">Anomalies ouvertes sans réparation</h2>
         {issues.length === 0 ? <Empty>Aucune.</Empty> : issues.map((s) => (
-          <div key={s.id} className="flex flex-wrap items-center gap-2 text-sm"><Link href={`/vehicules/${s.vehicle_id}`} className="font-mono font-semibold underline">{s.plate}</Link><Badge tone={PRIORITY_TONES[s.priority]}>{PRIORITY_LABELS[s.priority]}</Badge><span>{s.title}</span><span className="muted">depuis le {fmtDate(s.created_at)}</span></div>
+          <div key={s.id} className="flex flex-wrap items-center gap-2 text-sm"><Link href={`/vehicules/${s.vehicle_id}`} className="font-mono font-semibold underline">{s.plate}</Link>{s.priority ? <Badge tone={PRIORITY_TONES[s.priority]}>{PRIORITY_LABELS[s.priority]}</Badge> : <Badge tone="amber">À surveiller</Badge>}<span>{s.title}</span><span className="muted">depuis le {fmtDate(s.created_at)}</span></div>
         ))}
       </section>
 

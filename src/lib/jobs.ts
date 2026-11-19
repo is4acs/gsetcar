@@ -154,7 +154,17 @@ export async function verifyVehicleFolder(userId: string, vehicleId: string): Pr
     else if (!f.isFolder) message = "Cet identifiant ne désigne pas un dossier.";
     else if (f.trashed) message = "Ce dossier est dans la corbeille.";
     else if (!f.canAddChildren) message = `Dossier « ${f.name} » visible, mais l'application n'a pas le droit d'y déposer des fichiers.`;
-    else { ok = true; name = f.name; message = `Dossier « ${f.name} » vérifié : dépôt autorisé.`; }
+    else {
+      // Dépôt pilote : la seule preuve d'un droit d'écriture réel est d'écrire. Le fichier témoin est mis à la corbeille aussitôt.
+      const drive = driveClient();
+      const id = await drive.generateId();
+      const created = await drive.createFile({ id, name: `_GSET_test_depot_${v.plate}.txt`, parentId: v.drive_folder_id, mime: "text/plain",
+        data: Buffer.from("Fichier temoin cree par l'application Parc auto GSET pour verifier le droit de depot. Peut etre supprime.\n"), appProperties: { gsetPilot: "1" } });
+      if (!created) throw new Error("Le fichier témoin n'a pas pu être créé.");
+      ok = true; name = f.name;
+      try { await drive.trashFile(id); message = `Dossier « ${f.name} » vérifié par un dépôt pilote réussi (fichier témoin retiré).`; }
+      catch { message = `Dossier « ${f.name} » vérifié par un dépôt pilote réussi. Le fichier témoin « _GSET_test_depot_${v.plate}.txt » n'a pas pu être retiré : supprimez-le à la main.`; }
+    }
   } catch (e) {
     message = `Vérification impossible : ${(e as Error).message}`;
   }

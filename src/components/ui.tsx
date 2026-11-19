@@ -15,6 +15,7 @@ export function Shell({ user, title, back, wide, children }: { user: User; title
   const links: [string, string, boolean][] = [
     ["/", "Accueil", true],
     ["/direction", "Tableau de bord", can(user.role, "dashboard.view")],
+    ["/planning", "Planning", can(user.role, "dashboard.view")],
     ["/reparations", "Réparations", true],
     ["/envois", "Envois Drive", can(user.role, "jobs.manage")],
     ["/admin", "Administration", can(user.role, "admin.manage")],

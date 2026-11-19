@@ -10,7 +10,8 @@
     "migrate": "tsx --env-file-if-exists=.env.local scripts/migrate.ts",
     "seed": "tsx --env-file-if-exists=.env.local scripts/seed.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import:parc": "tsx --env-file-if-exists=.env.local scripts/import-parc.ts"
   },
   "dependencies": {
     "jose": "^6.2.18",
@@ -31,6 +32,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
+    "exceljs": "^4.4.0",
     "tailwindcss": "4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^5",

@@ -3,20 +3,24 @@ import { requirePermission } from "@/lib/auth";
 import { q } from "@/lib/db";
 import { ROLE_LABELS, ROLES, type Role } from "@/lib/permissions";
 import { Badge, Field, Flash, Shell } from "@/components/ui";
-import { inspectionIntervalDays } from "@/lib/queries";
+import { alertContact } from "@/lib/queries";
+import { secretMeta } from "@/lib/secrets";
 import { VEHICLE_STATUS_LABELS } from "@/lib/labels";
 import { fmtDate } from "@/lib/format";
-import { folderUrl } from "@/lib/drive";
-import { addVehicle, saveInterval, saveUser, setUserActive, setUserScope, setVehicleFolder, verifyFolderAction } from "@/app/actions";
+import { DRIVE_SECRET, driveMode, folderUrl } from "@/lib/drive";
+import { addVehicle, disconnectDrive, saveAlertContact, saveUser, setUserActive, setUserScope, setVehicleFolder, verifyFolderAction } from "@/app/actions";
 
 export default async function Admin({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const user = await requirePermission("admin.manage");
-  const [users, vehicles, scopes, interval] = await Promise.all([
+  const [users, vehicles, scopes, contact, driveAccount] = await Promise.all([
     q<{ id: string; email: string; name: string; role: Role; active: boolean }>("select id, email, name, role, active from users order by active desc, role, name"),
     q<{ id: string; plate: string; label: string; status: string; drive_folder_id: string | null; drive_folder_name: string | null; drive_folder_verified_at: Date | null }>("select id, plate, label, status, drive_folder_id, drive_folder_name, drive_folder_verified_at from vehicles order by status, plate"),
     q<{ user_id: string; vehicle_id: string }>("select user_id, vehicle_id from user_vehicle_scope"),
-    inspectionIntervalDays(),
+    alertContact(),
+    secretMeta<{ email: string | null }>(DRIVE_SECRET),
   ]);
+  let mode: string;
+  try { mode = driveMode(); } catch { mode = "none"; }
   const backInput = <input type="hidden" name="_back" value="/admin" />;
   return (
     <Shell user={user} title="Administration" wide>
@@ -45,7 +49,7 @@ export default async function Admin({ searchParams }: { searchParams: Promise<Re
       <section className="card space-y-3">
         <h2 className="h2">Véhicules et dossiers Drive</h2>
         <p className="muted">Chaque véhicule est lié à un identifiant de dossier stable. Aucun dépôt n&apos;a lieu tant que le dossier n&apos;a pas été vérifié avec les accès de l&apos;application. L&apos;application ne déplace, ne renomme et ne supprime jamais un document existant.</p>
-        <div className="overflow-x-auto"><table className="table"><thead><tr><th>Véhicule</th><th>Statut</th><th>Dossier Drive</th><th>Vérification</th><th>Associer / vérifier</th></tr></thead><tbody>
+        <div className="overflow-x-auto"><table className="table"><thead><tr><th>Véhicule</th><th>Statut</th><th>Dossier Drive</th><th>Dépôt pilote</th><th>Associer / vérifier</th></tr></thead><tbody>
           {vehicles.map((v) => (
             <tr key={v.id}>
               <td><Link href={`/vehicules/${v.id}`} className="font-mono font-semibold text-blue-700 underline">{v.plate}</Link><div className="muted">{v.label}</div></td>
@@ -66,10 +70,26 @@ export default async function Admin({ searchParams }: { searchParams: Promise<Re
       </section>
 
       <section className="card space-y-3">
-        <h2 className="h2">Périodicité des contrôles</h2>
-        <form action={saveInterval} className="flex flex-wrap items-end gap-2">{backInput}
-          <Field label="Un contrôle tous les … jours" hint="Vide = non définie : le tableau de bord n'invente aucune échéance."><input name="days" inputMode="numeric" className="input w-40" defaultValue={interval ?? ""} /></Field>
+        <h2 className="h2">Compte Google Drive</h2>
+        <p className="muted">Le dossier « VEHICULES GUYANE » est dans « Mon Drive » : l&apos;application dépose les fichiers au nom d&apos;un compte Google GSET qui a le droit d&apos;écrire dans ces dossiers.</p>
+        {mode === "mock" && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">Simulateur Drive actif (développement) : aucun fichier n&apos;est envoyé vers Google Drive.</p>}
+        {mode === "none" && <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">Drive non configuré (variable DRIVE_MODE) : les documents restent en attente.</p>}
+        {mode === "service_account" && <p className="text-sm">Mode identité de service.</p>}
+        {mode === "oauth" && (driveAccount
+          ? <div className="flex flex-wrap items-center gap-3 text-sm"><Badge tone="green">Connecté</Badge><span>{driveAccount.email ?? "compte inconnu"} · depuis le {fmtDate(driveAccount.updated_at)}</span>
+              <a href="/api/drive/oauth/start" className="btn-secondary btn-sm">Changer de compte</a>
+              <form action={disconnectDrive}>{backInput}<button className="btn-secondary btn-sm">Déconnecter</button></form></div>
+          : <div className="flex flex-wrap items-center gap-3 text-sm"><Badge tone="red">Aucun compte connecté</Badge><a href="/api/drive/oauth/start" className="btn-primary btn-sm">Connecter le compte Google GSET</a></div>)}
+        <p className="muted">Après connexion, « Vérifier » sur chaque véhicule effectue un dépôt pilote : un petit fichier témoin est créé dans le dossier puis retiré. Aucun rapport n&apos;est déposé dans un dossier non vérifié.</p>
+      </section>
+
+      <section className="card space-y-3">
+        <h2 className="h2">Appel en cas d&apos;immobilisation</h2>
+        <form action={saveAlertContact} className="flex flex-wrap items-end gap-2">{backInput}
+          <Field label="Personne à prévenir"><input name="name" className="input w-48" defaultValue={contact.name} /></Field>
+          <Field label="Téléphone" hint="Utilisé par le bouton « Appeler » affiché au contrôleur."><input name="phone" type="tel" className="input w-56" defaultValue={contact.phone ?? ""} placeholder="+594 …" /></Field>
           <button className="btn-secondary">Enregistrer</button></form>
+        {!contact.phone && <p className="text-sm font-medium text-amber-800">Numéro non renseigné : le contrôleur verra la consigne d&apos;appeler, sans bouton d&apos;appel direct.</p>}
       </section>
     </Shell>
   );

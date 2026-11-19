@@ -17,11 +17,12 @@ const { MockDrive } = await import("@/lib/drive");
 const { checklistFor } = await import("@/lib/checklist");
 import type { User } from "@/lib/auth";
 
+const SIGNATURE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
 let tech: User, tech2: User, direction: User, vehicleId: string;
 
-const answersAllGood = () => checklistFor({ nacelle: false }).flatMap((g) => g.items.map((i) => ({ itemCode: i.code, answer: "bon" as string, comment: null as string | null, priority: null as string | null, delay: null as string | null, photoIds: [] as string[] })));
-const payload = (over: Record<string, unknown> = {}) => ({ id: randomUUID(), vehicleId, mileageKm: 120000, criticalFlag: false, answers: answersAllGood(), ...over });
+const answersAllGood = () => checklistFor({ nacelle: false }).flatMap((g) => g.items.map((i) => ({ itemCode: i.code, answer: "bon" as string, comment: null as string | null, priority: null as string | null, recommendation: null as string | null, estimateHtCents: null as number | null, garage: null as string | null, photoIds: [] as string[] })));
+const payload = (over: Record<string, unknown> = {}) => ({ id: randomUUID(), vehicleId, mileageKm: 120000, criticalFlag: false, controllerSignature: SIGNATURE, driverName: "Conducteur Test", driverSignature: SIGNATURE, answers: answersAllGood(), ...over });
 const stagePhoto = async (user: User) => {
   const id = randomUUID();
   await q("insert into staged_uploads (id, uploader_id, mime, size_bytes, data) values ($1,$2,'image/jpeg',$3,$4)", [id, user.id, JPEG.length, JPEG]);
@@ -48,15 +49,18 @@ describe.skipIf(!url)("intégration", () => {
   it("un contrôle crée réponses, anomalie, réparation, documents et travaux dans une seule transaction", async () => {
     const photo = await stagePhoto(tech);
     const answers = answersAllGood();
-    Object.assign(answers.find((a) => a.itemCode === "pneus_av")!, { answer: "intervention", comment: "Pneu lisse", priority: "haute", delay: "7_jours", photoIds: [photo] });
-    Object.assign(answers.find((a) => a.itemCode === "niv_lave_glace")!, { answer: "a_surveiller", comment: "Niveau bas", priority: "basse" });
+    Object.assign(answers.find((a) => a.itemCode === "p07")!, { answer: "intervention", comment: "Pneu lisse", priority: "15_jours", recommendation: "Remplacer les 2 pneus avant", estimateHtCents: 24000, garage: "Garage Test", photoIds: [photo] });
+    Object.assign(answers.find((a) => a.itemCode === "p05")!, { answer: "a_surveiller" });
     const p = payload({ answers });
     const res = await submitInspection(tech, p);
     expect(res.duplicate).toBe(false);
     expect((await q1<{ summary: string }>("select summary from inspections where id = $1", [p.id]))!.summary).toBe("intervention");
     expect((await q("select 1 from issues where inspection_id = $1", [p.id])).length).toBe(2);
-    const repairs = await q<{ status: string }>("select status from repairs where vehicle_id = $1", [vehicleId]);
-    expect(repairs).toEqual([{ status: "a_chiffrer" }]);
+    // Le chiffrage proposé par le contrôleur est repris dans la réparation : aucune ressaisie.
+    const repairs = await q("select status, title, garage, estimate_ht_cents, estimate_ttc_cents from repairs where vehicle_id = $1", [vehicleId]);
+    expect(repairs).toEqual([{ status: "a_chiffrer", title: "Remplacer les 2 pneus avant", garage: "Garage Test", estimate_ht_cents: 24000, estimate_ttc_cents: null }]);
+    expect((await q("select role from inspection_signatures where inspection_id = $1 order by role", [p.id])).map((r) => r.role)).toEqual(["conducteur", "controleur"]);
+    expect((await q("select 1 from immobilizations where vehicle_id = $1", [vehicleId])).length).toBe(0);
     expect((await q("select 1 from drive_jobs j join documents d on d.id = j.document_id where d.inspection_id = $1", [p.id])).length).toBe(2);
     expect((await q("select 1 from staged_uploads where id = $1", [photo])).length).toBe(0);
   });
@@ -101,7 +105,7 @@ describe.skipIf(!url)("intégration", () => {
   it("Drive a accepté le fichier mais la réponse est perdue : pas de second fichier à la reprise", async () => {
     const photo = await stagePhoto(tech);
     const answers = answersAllGood();
-    Object.assign(answers.find((a) => a.itemCode === "car_carrosserie")!, { answer: "a_surveiller", comment: "Rayure", priority: "basse", photoIds: [photo] });
+    Object.assign(answers.find((a) => a.itemCode === "p33")!, { answer: "a_surveiller", comment: "Rayure", photoIds: [photo] });
     const p = payload({ answers });
     await submitInspection(tech, p);
     process.env.DRIVE_MOCK_FAIL = "create_lost";
@@ -136,6 +140,49 @@ describe.skipIf(!url)("intégration", () => {
     expect(driveFiles().filter((f) => f.parentId === v.drive_controles_folder_id).length).toBe(2);
   });
 
+  it("véhicule sans dossier Drive (DV-454-FA) : contrôle saisi, rapport en attente jusqu'à l'association du dossier", async () => {
+    await q("update vehicles set drive_folder_id = null, drive_folder_verified_at = null where id = $1", [vehicleId]);
+    const p = payload();
+    await submitInspection(tech, p);
+    expect(await runDriveJobs()).toMatchObject({ blocked: 1, done: 0 });
+    expect((await q1<{ last_error: string }>("select last_error from drive_jobs j join documents d on d.id = j.document_id where d.inspection_id = $1", [p.id]))!.last_error).toMatch(/Aucun dossier Drive/);
+    expect((await q("select 1 from document_blobs b join documents d on d.id = b.document_id where d.inspection_id = $1", [p.id])).length).toBe(0); // rapport pas encore généré, rien de perdu
+    await q("update vehicles set drive_folder_id = $2 where id = $1", [vehicleId, "folder_late_" + randomUUID().slice(0, 6)]);
+    const v = await verifyVehicleFolder(direction.id, vehicleId); // dépôt pilote
+    expect(v).toMatchObject({ ok: true });
+    expect(v.message).toMatch(/dépôt pilote réussi/);
+    expect(driveFiles().some((f) => f.name.startsWith("_GSET_test_depot"))).toBe(false); // fichier témoin retiré
+    expect((await runDriveJobs()).done).toBe(1);
+    expect((await q1<{ sync_status: string }>("select sync_status from documents where inspection_id = $1", [p.id]))!.sync_status).toBe("depose");
+  });
+
+  it("défaillance de sécurité (freins) : véhicule déclaré immobilisé automatiquement, sans doublon à la relance", async () => {
+    const answers = answersAllGood();
+    Object.assign(answers.find((a) => a.itemCode === "p13")!, { answer: "urgent", comment: "Pédale molle, freinage insuffisant" });
+    const p = payload({ answers, driverSignature: null, driverAbsentReason: "Conducteur absent" });
+    await submitInspection(tech, p);
+    await submitInspection(tech, p);
+    const immos = await q<{ status: string; auto_rule: boolean; decided_by: string | null; reason: string }>("select status, auto_rule, decided_by, reason from immobilizations where vehicle_id = $1", [vehicleId]);
+    expect(immos.length).toBe(1);
+    expect(immos[0]).toMatchObject({ status: "active", auto_rule: true, decided_by: null });
+    expect(immos[0].reason).toMatch(/freins/);
+    const i = (await q1<{ summary: string; critical_flag: boolean; driver_absent_reason: string }>("select summary, critical_flag, driver_absent_reason from inspections where id = $1", [p.id]))!;
+    expect(i).toEqual({ summary: "immobilise", critical_flag: true, driver_absent_reason: "Conducteur absent" });
+    expect((await q1<{ urgent: boolean }>("select urgent from repairs where vehicle_id = $1", [vehicleId]))!.urgent).toBe(true);
+    // Un « Urgent » hors organes de sécurité signale sans immobiliser.
+    await q("update immobilizations set status = 'levee' where vehicle_id = $1", [vehicleId]);
+    const others = answersAllGood();
+    Object.assign(others.find((a) => a.itemCode === "p27")!, { answer: "urgent", comment: "Climatisation HS" });
+    await submitInspection(tech, payload({ answers: others }));
+    expect((await q("select 1 from immobilizations where vehicle_id = $1 and status = 'active'", [vehicleId])).length).toBe(0);
+  });
+
+  it("signatures : contrôleur obligatoire, conducteur signé ou absence justifiée", async () => {
+    await expect(submitInspection(tech, payload({ controllerSignature: undefined }))).rejects.toMatchObject({ status: 422 });
+    await expect(submitInspection(tech, payload({ driverSignature: null }))).rejects.toMatchObject({ status: 422 });
+    await expect(submitInspection(tech, payload({ controllerSignature: "data:image/png;base64,AAAA" }))).rejects.toMatchObject({ status: 422 });
+  });
+
   it("dossier inaccessible en écriture : la vérification échoue", async () => {
     await q("update vehicles set drive_folder_id = 'lecture_seule', drive_folder_verified_at = null where id = $1", [vehicleId]);
     const r = await verifyVehicleFolder(direction.id, vehicleId);
@@ -167,7 +214,7 @@ describe.skipIf(!url)("intégration", () => {
     await expect(submitInspection(tech, payload({ mileageKm: 40000 }))).rejects.toMatchObject({ status: 422, details: { code: "kilometrage_inferieur" } });
     await submitInspection(tech, payload({ mileageKm: 40000, mileageLowerConfirmed: true }));
     const answers = answersAllGood();
-    Object.assign(answers[0], { answer: "intervention", comment: "x", priority: "haute", delay: "immediat", photoIds: [await stagePhoto(tech2)] }); // photo d'un autre utilisateur
+    Object.assign(answers[5], { answer: "intervention", comment: "x", priority: "1_mois", photoIds: [await stagePhoto(tech2)] }); // photo d'un autre utilisateur
     await expect(submitInspection(tech, payload({ answers }))).rejects.toMatchObject({ details: { code: "photos_manquantes" } });
     await expect(submitInspection({ ...tech, role: "administratif" }, payload())).rejects.toMatchObject({ status: 403 });
     const other = (await q1<{ id: string }>("insert into vehicles (plate, label, status) values ($1,'Autre','actif') returning id", ["O-" + randomUUID().slice(0, 6)]))!.id;

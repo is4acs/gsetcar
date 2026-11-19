@@ -3,7 +3,7 @@ import { vehicleScope, type User } from "./auth";
 import type { Summary } from "./checklist";
 
 export type VehicleRow = {
-  id: string; plate: string; label: string; nacelle: boolean; status: string; status_confirmed_at: Date | null; site: string | null; assignment: string | null;
+  id: string; plate: string; label: string; nacelle: boolean; status: string; status_confirmed_at: Date | null; site: string | null; assignment: string | null; control_week: number | null;
   drive_folder_id: string | null; drive_folder_verified_at: Date | null;
   last_inspection_id: string | null; last_inspection_at: Date | null; last_summary: Summary | null; last_km: number | null;
   immobilized: boolean; immobilization_proposed: boolean; open_repairs: number;
@@ -13,7 +13,7 @@ export type VehicleRow = {
 export async function listVehicles(user: User, opts: { activeOnly?: boolean } = {}): Promise<VehicleRow[]> {
   const scope = await vehicleScope(user.id, user.role);
   return q<VehicleRow>(
-    `select v.id, v.plate, v.label, v.nacelle, v.status, v.status_confirmed_at, v.site, v.assignment, v.drive_folder_id, v.drive_folder_verified_at,
+    `select v.id, v.plate, v.label, v.nacelle, v.status, v.status_confirmed_at, v.site, v.assignment, v.control_week, v.drive_folder_id, v.drive_folder_verified_at,
             li.id as last_inspection_id, li.performed_at as last_inspection_at, li.summary as last_summary,
             (select max(mileage_km) from inspections where vehicle_id = v.id) as last_km,
             exists(select 1 from immobilizations m where m.vehicle_id = v.id and m.status = 'active') as immobilized,
@@ -28,5 +28,9 @@ export async function listVehicles(user: User, opts: { activeOnly?: boolean } = 
 export async function getSetting<T>(key: string): Promise<T | null> {
   return (await q1<{ value: T }>("select value from settings where key = $1", [key]))?.value ?? null;
 }
-/** Périodicité des contrôles en jours. null tant que la direction ne l'a pas définie : aucune échéance n'est inventée. */
-export const inspectionIntervalDays = () => getSetting<number>("periodicite_controle_jours");
+export type AlertContact = { name: string; phone: string | null };
+/** Personne à prévenir par téléphone en cas d'immobilisation (classeur : Salim). Numéro saisi par l'administrateur. */
+export async function alertContact(): Promise<AlertContact> {
+  const c = await getSetting<Partial<AlertContact>>("contact_urgence");
+  return { name: c?.name?.trim() || "Salim", phone: c?.phone?.trim() || null };
+}

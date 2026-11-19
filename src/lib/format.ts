@@ -1,4 +1,4 @@
-const TZ = process.env.NEXT_PUBLIC_APP_TIMEZONE || "America/Guadeloupe";
+const TZ = process.env.NEXT_PUBLIC_APP_TIMEZONE || "America/Cayenne";
 
 export function fmtDate(d: Date | string | null | undefined): string {
   if (!d) return "—";
@@ -39,3 +39,17 @@ export function pgDate(d: Date | string | null): string | null {
 
 /** Heure courante en millisecondes (les pages serveur sont rendues à chaque requête). */
 export const nowMs = (): number => Date.now();
+
+/** Jour, mois « AAAA-MM » et quantième dans le fuseau de l'application. */
+export function localParts(d: Date | string = new Date()): { day: string; month: string; dayOfMonth: number } {
+  const day = isoDay(d);
+  return { day, month: day.slice(0, 7), dayOfMonth: Number(day.slice(8, 10)) };
+}
+export function addMonths(month: string, n: number): string {
+  const [y, m] = month.split("-").map(Number);
+  const t = y * 12 + (m - 1) + n;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`;
+}
+export function fmtMonth(month: string, short = false): string {
+  return new Intl.DateTimeFormat("fr-FR", { timeZone: "UTC", month: short ? "short" : "long", year: short ? "2-digit" : "numeric" }).format(new Date(month + "-15T00:00:00Z"));
+}

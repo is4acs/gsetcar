@@ -19,8 +19,11 @@ create table vehicles (
   status_confirmed_at timestamptz,
   status_confirmed_by uuid references users(id),
   site text,
-  assignment text,
+  assignment text, -- conducteur affecté
   notes text,
+  cg_holder text,    -- titulaire de la carte grise (classeur)
+  cg_status text,    -- statut de la carte grise (classeur)
+  control_week integer check (control_week between 1 and 4), -- semaine du mois prévue pour le contrôle (S1 à S4)
   drive_folder_id text,
   drive_folder_name text,
   drive_folder_verified_at timestamptz,
@@ -49,6 +52,9 @@ create table inspections (
   author_id uuid not null references users(id),
   performed_at timestamptz not null,
   mileage_km integer not null check (mileage_km >= 0),
+  previous_km integer,        -- dernier relevé connu au moment du contrôle
+  location text,              -- lieu du contrôle
+  driver_name text,           -- conducteur affecté au moment du contrôle
   checklist_version text not null,
   general_comment text,
   critical_flag boolean not null,
@@ -65,14 +71,19 @@ create table inspection_answers (
   id uuid primary key default gen_random_uuid(),
   inspection_id uuid not null references inspections(id) on delete cascade,
   position integer not null,
+  ref integer not null,       -- numéro du point sur la fiche de contrôle
   item_code text not null,
   group_label text not null,
   item_label text not null,
   essential boolean not null,
-  answer text not null check (answer in ('bon','a_surveiller','intervention','non_verifie','non_applicable')),
+  answer text not null check (answer in ('bon','a_surveiller','intervention','urgent','non_verifie','non_applicable')),
+  measure text,               -- mesure / valeur relevée
   comment text,
-  priority text check (priority in ('basse','normale','haute','urgente')),
-  delay text check (delay in ('immediat','7_jours','30_jours','prochain_entretien')),
+  -- Recommandation de réparation (points « À réparer » ou « Urgent »)
+  priority text check (priority in ('urgent','15_jours','1_mois','prochain_entretien')),
+  recommendation text,
+  estimate_ht_cents integer check (estimate_ht_cents >= 0),
+  garage text,
   unique (inspection_id, item_code)
 );
 
@@ -83,9 +94,8 @@ create table issues (
   answer_id uuid references inspection_answers(id),
   title text not null,
   description text,
-  severity text not null check (severity in ('a_surveiller','intervention')),
-  priority text not null check (priority in ('basse','normale','haute','urgente')),
-  delay text,
+  severity text not null check (severity in ('a_surveiller','intervention','urgent')),
+  priority text check (priority in ('urgent','15_jours','1_mois','prochain_entretien')), -- NULL pour un point à surveiller
   status text not null default 'ouverte' check (status in ('ouverte','resolue','classee')),
   closed_at timestamptz,
   closed_by uuid references users(id),
@@ -132,6 +142,8 @@ create table immobilizations (
   inspection_id uuid references inspections(id),
   repair_id uuid references repairs(id),
   reason text not null,
+  -- true : déclarée automatiquement par la règle de sécurité (freins, pneus, direction, éclairage) à la validation du contrôle
+  auto_rule boolean not null default false,
   status text not null default 'proposee' check (status in ('proposee','active','rejetee','levee')),
   proposed_by uuid not null references users(id),
   proposed_at timestamptz not null default now(),
@@ -145,6 +157,17 @@ create table immobilizations (
 create index on immobilizations (vehicle_id, status);
 create unique index immobilizations_one_per_inspection on immobilizations (inspection_id)
   where inspection_id is not null;
+
+-- Signatures tracées sur le téléphone (contrôleur, conducteur), intégrées au rapport PDF.
+create table inspection_signatures (
+  inspection_id uuid not null references inspections(id) on delete cascade,
+  role text not null check (role in ('controleur','conducteur')),
+  signer_name text not null,
+  image bytea not null, -- PNG
+  signed_at timestamptz not null default now(),
+  primary key (inspection_id, role)
+);
+alter table inspections add column driver_absent_reason text; -- renseigné si le conducteur n'a pas pu signer
 
 create table vehicle_deadlines (
   id uuid primary key default gen_random_uuid(),
@@ -214,6 +237,15 @@ create table drive_jobs (
   finished_at timestamptz
 );
 create index on drive_jobs (status, next_attempt_at);
+
+-- Secrets applicatifs chiffrés (AES-256-GCM, clé dérivée de AUTH_SECRET) : jeton Drive du compte connecté.
+create table app_secrets (
+  key text primary key,
+  ciphertext text not null,
+  meta jsonb,
+  updated_at timestamptz not null default now(),
+  updated_by uuid references users(id)
+);
 
 create table audit_log (
   id bigserial primary key,
