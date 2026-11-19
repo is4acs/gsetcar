@@ -1,3 +1,4 @@
+import { kickDriveJobs } from "@/lib/kick";
 import Link from "next/link";
 import { requirePermission } from "@/lib/auth";
 import { q, q1 } from "@/lib/db";
@@ -13,6 +14,7 @@ import { acknowledgeCritical, decideImmobilization } from "@/app/actions";
 
 export default async function Dashboard({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const user = await requirePermission("dashboard.view");
+  await kickDriveJobs();
   const sp = await searchParams;
   const f = { plate: sp.plaque ?? "", site: sp.site ?? "", priority: sp.priorite ?? "", status: sp.statut ?? "" };
   const all = await listVehicles(user);

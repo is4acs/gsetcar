@@ -1,3 +1,4 @@
+import { kickDriveJobs } from "@/lib/kick";
 import Link from "next/link";
 import { requirePermission } from "@/lib/auth";
 import { q } from "@/lib/db";
@@ -12,6 +13,7 @@ type Row = { id: string; status: string; attempts: number; max_attempts: number;
 
 export default async function Jobs({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const user = await requirePermission("jobs.manage");
+  await kickDriveJobs();
   const select = `select j.*, d.kind, d.filename, d.inspection_id, d.repair_id, d.vehicle_id, v.plate from drive_jobs j join documents d on d.id = j.document_id join vehicles v on v.id = d.vehicle_id`;
   const [open, recent] = await Promise.all([
     q<Row>(`${select} where j.status <> 'termine' order by j.created_at limit 200`),

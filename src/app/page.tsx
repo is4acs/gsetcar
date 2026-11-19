@@ -1,3 +1,4 @@
+import { kickDriveJobs } from "@/lib/kick";
 import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { can } from "@/lib/permissions";
@@ -7,6 +8,7 @@ import { LocalDraftsNotice } from "./controle/drafts-notice";
 
 export default async function Home({ searchParams }: { searchParams: Promise<Record<string, string>> }) {
   const user = await requireUser();
+  await kickDriveJobs();
   const sp = await searchParams;
   const pending = can(user.role, "jobs.manage") ? await q1<{ n: number }>("select count(*)::int as n from drive_jobs where status <> 'termine'") : null;
   return (

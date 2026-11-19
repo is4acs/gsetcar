@@ -66,8 +66,11 @@ Un technicien peut être limité à certains véhicules (Administration → pér
 
 1. La validation enregistre, **dans une seule transaction**, le contrôle, les anomalies, les réparations,
    les documents et un travail d'envoi par document (`drive_jobs`).
-2. Une tâche planifiée Vercel (`vercel.json`, toutes les 2 minutes) appelle `/api/jobs/run`. Un déclenchement
-   immédiat après validation accélère le dépôt, mais la garantie repose sur la file en base.
+2. Les envois partent juste après la validation, puis à chaque utilisation de l'application (accueil, tableau de
+   bord, écran de suivi du contrôle, « Envois Drive ») tant qu'il en reste à échéance. Une tâche planifiée Vercel
+   (`vercel.json`) appelle aussi `/api/jobs/run` une fois par jour : c'est le maximum accepté par l'offre Hobby,
+   qui refuse le déploiement au-delà. Sur l'offre Pro, passer la planification à `*/5 * * * *`. Dans tous les
+   cas la garantie repose sur la file en base : rien n'est perdu si un traitement est interrompu.
 3. Pour chaque document : génération du PDF (pdf-lib), **réservation d'un identifiant Drive enregistré avant
    l'envoi**, puis création du fichier avec cet identifiant. Si Drive a accepté le fichier mais que la réponse
    s'est perdue, la reprise retrouve le fichier par son identifiant au lieu d'en créer un second.
@@ -139,7 +142,7 @@ dossier non vérifié, correction versionnée et périmètres.
    OAuth (portée `drive`, écran de consentement « Interne » si le compte est dans Google Workspace), puis dans
    Administration : « Connecter le compte Google GSET ». Le jeton est stocké chiffré en base. Ne jamais rendre
    les dossiers publics. (Un Drive partagé permettrait `DRIVE_MODE=service_account`.)
-4. **Vercel** (offre Pro : usage commercial et tâche planifiée toutes les 2 minutes) : variables de `.env.example`,
+4. **Vercel** (l'offre Hobby est réservée à l'usage personnel non commercial : prévoir l'offre Pro pour GSET) : variables de `.env.example`,
    dont `CRON_SECRET` et `APP_URL`.
 5. Administration : créer les utilisateurs, saisir le numéro d'appel en cas d'immobilisation, **vérifier chaque
    dossier Drive par un dépôt pilote** (fichier témoin créé puis retiré), associer celui de DV-454-FA quand il
